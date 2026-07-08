@@ -21,7 +21,7 @@
 
 ## 使用说明
 
-1. 将 `setting.json` 文件中的 token 改为自己的 Discord token
+1. 将 `settings.json` 文件中的 token 改为自己的 Discord token
 2. 运行 Python 脚本
 3. 按照终端提示选择操作
 （该项目可以下载需要nitro特权才能解锁的表情贴图）
@@ -31,3 +31,15 @@
 - `数字`: 选择特定服务器 (如: 1)
 - `R`: 刷新服务器列表
 - `Q`: 退出程序
+
+## 命令行参数
+
+- `--token`: 临时指定 token（优先于 `settings.json`）
+- `--dir`: 指定输出目录（默认输出到项目下 `emotes` 目录）
+- `--guild`: 直接下载指定服务器 ID
+- `--json`: 将服务器详情导出为 JSON（配合 `--guild` 使用）
+
+## 日志说明
+
+- 常规日志与限流重试统计写入 `downloader.log`
+- 429 重试细节与每个服务器的重试汇总仅写日志文件，不会打断终端进度显示

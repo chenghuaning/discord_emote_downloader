@@ -7,6 +7,26 @@ from services import *
 from utils import *
 from models import *
 logger = setup_logger()
+rate_limit_logger = get_file_only_logger("rate_limit.summary")
+
+
+def log_retry_summary(context: str, api: DiscordAPIService, downloader: Optional[DownloadService] = None):
+    api_metrics = api.consume_retry_metrics()
+    download_metrics = downloader.consume_retry_metrics() if downloader else {
+        "retries": 0,
+        "rate_limit_hits": 0,
+        "wait_seconds": 0.0,
+    }
+
+    has_retries = api_metrics["retries"] > 0 or download_metrics["retries"] > 0
+    if not has_retries:
+        return
+
+    rate_limit_logger.info(
+        f"retry_summary context={context} "
+        f"api(retries={api_metrics['retries']},429={api_metrics['rate_limit_hits']},wait={api_metrics['wait_seconds']:.2f}s) "
+        f"download(retries={download_metrics['retries']},429={download_metrics['rate_limit_hits']},wait={download_metrics['wait_seconds']:.2f}s)"
+    )
 
 @click.command()
 @click.option("--token", help="Use specified token instead of loading from settings")
@@ -18,7 +38,7 @@ def main(token: Optional[str], dir: Optional[str], guild: Optional[str], json: b
         token = load_token(token)
         api = DiscordAPIService(token)
         downloader = DownloadService()
-        archive = ArchiveService()
+        archive = ArchiveService(output_dir=dir)
 
         async def async_main():
             if guild:
@@ -35,6 +55,7 @@ def main(token: Optional[str], dir: Optional[str], guild: Optional[str], json: b
 async def main_loop(api: DiscordAPIService, downloader: DownloadService, archive: ArchiveService):
     clear_screen()
     guilds = await api.get_guilds()
+    log_retry_summary("guild_list_initial", api)
 
     while True:
         print_guilds(guilds)
@@ -51,6 +72,7 @@ async def main_loop(api: DiscordAPIService, downloader: DownloadService, archive
         elif choice == "r":
             clear_screen()
             guilds = await api.get_guilds()
+            log_retry_summary("guild_list_refresh", api)
             continue
         elif choice == "q":
             print("\n光注vedal987谢谢喵")
@@ -66,17 +88,20 @@ async def main_loop(api: DiscordAPIService, downloader: DownloadService, archive
 
 
 async def process_single_guild(api: DiscordAPIService, downloader: DownloadService,
-                               archive: ArchiveService, guild_id: str, json_dump: bool):
+                               archive: ArchiveService, guild_id: str, json_dump: bool,
+                               wait_for_input: bool = True):
     clear_screen()
-    guild_data = await api.get_guild_data(guild_id)
-    guild_name = sanitize_filename(guild_data["name"])
-    print(f"准备下载服务器: {guild_name}")
-    print("=" * 40)
+    guild_name = guild_id
 
     try:
+        guild_data = await api.get_guild_data(guild_id)
+        guild_name = sanitize_filename(guild_data["name"])
+        print(f"准备下载服务器: {guild_name}")
+        print("=" * 40)
+
         if json_dump:
-            # JSON导出逻辑
-            pass
+            json_path = archive.create_json_dump(guild_name, guild_data)
+            logger.info(f"JSON 已导出: {json_path}")
         else:
             emotes = [
                 Emote(id=e["id"], name=e["name"], animated=e.get("animated", False))
@@ -87,43 +112,38 @@ async def process_single_guild(api: DiscordAPIService, downloader: DownloadServi
                 for s in guild_data.get("stickers", [])
             ]
 
+            total = len(emotes) + len(stickers)
             with tqdm(
                     desc="总进度",
                     unit="文件",
                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [速率: {rate_fmt}, 剩余: {remaining}]",
-                    mininterval=0.5
+                    mininterval=0.5,
+                    total=total,
             ) as pbar:
-                results = []
-                total = len(emotes) + len(stickers)
-                pbar.reset(total=total)
+                results, errors = await downloader.download_all(
+                    emotes,
+                    stickers,
+                    progress_callback=lambda: pbar.update(1),
+                )
 
-                for emote in emotes:
-                    try:
-                        item = await downloader.download_emote(emote)
-                        results.append(item)
-                        pbar.update(1)
-                    except Exception as e:
-                        logger.error(f"表情下载失败: {emote.name} - {str(e)}")
-                        pbar.update(1)
+            for error in errors:
+                logger.error(error)
 
-                for sticker in stickers:
-                    try:
-                        item = await downloader.download_sticker(sticker)
-                        results.append(item)
-                        pbar.update(1)
-                    except Exception as e:
-                        logger.error(f"贴纸下载失败: {sticker.name} - {str(e)}")
-                        pbar.update(1)
-
+            if results:
                 zip_path = archive.create_archive(guild_name, results)
                 logger.info(f"存档已创建: {zip_path}")
+            else:
+                logger.warning("没有可写入存档的文件")
 
         print("\n✓ 下载完成!")
     except Exception as e:
         print(f"\n× 下载失败: {str(e)}")
+    finally:
+        log_retry_summary(f"guild:{guild_name}", api, downloader)
 
-    input("\n按Enter键返回主菜单...")
-    clear_screen()
+    if wait_for_input:
+        input("\n按Enter键返回主菜单...")
+        clear_screen()
 
 
 async def process_all_guilds(api: DiscordAPIService, downloader: DownloadService,
@@ -135,7 +155,7 @@ async def process_all_guilds(api: DiscordAPIService, downloader: DownloadService
     success = 0
     for guild in guilds:
         try:
-            await process_single_guild(api, downloader, archive, guild.id, False)
+            await process_single_guild(api, downloader, archive, guild.id, False, wait_for_input=False)
             success += 1
         except Exception as e:
             print(f"处理失败 {guild.name}: {str(e)}")
